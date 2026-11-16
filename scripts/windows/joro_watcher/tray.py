@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 
-from joro_watcher.event_log import record
+from joro_watcher.event_log import failure as error_fields, record
 
 
 def presentation(value):
@@ -90,7 +90,7 @@ def exit_monitoring(helper, icon, icons, stopped, failure):
     except Exception as exc:
         failure["error"] = "could not stop helper; retry Exit"
         update(icon, icons, failure)
-        record("exit_failed", source="tray", error=str(exc))
+        record("exit_failed", source="tray", **error_fields(exc))
         return False
     record("exit", source="tray")
     stopped.set()
@@ -116,8 +116,19 @@ def observe_once(helper, icon, icons, failure, previous):
             update(icon, icons, {"error": "observer failed; retrying"})
         except Exception:
             pass  # A shell/UI failure is retried on the next observer tick too.
-        record("observer_failed", source="tray", error=str(exc))
+        record("observer_failed", source="tray", **error_fields(exc))
         return None
+
+
+def beat(helper, identity, healthy):
+    """Refresh the tray's heartbeat; a write failure is recorded once and never ends the observer."""
+    try:
+        helper.write(helper.ROOT / "tray.json", {**identity, "updated_at": time.time()})
+        return True
+    except Exception as exc:
+        if healthy:
+            record("heartbeat_failed", source="tray", **error_fields(exc, message=False))
+        return False
 
 
 def run(helper):
@@ -136,9 +147,11 @@ def run(helper):
                         menu=pystray.Menu(pystray.MenuItem("Exit", lambda: exit_monitoring(
                             helper, icon, icons, stopped, failure))))
     failure = {}
+    peer = helper.Peer("helper", "helper.json")
+    identity = {"pid": os.getpid(), "birth": helper.birth(os.getpid())}
 
     def monitor():
-        previous = None
+        previous, healthy = None, True
         while not stopped.is_set():
             if helper.K.WaitForSingleObject(exit_event, 0) == 0:
                 record("exit", source="tray", reason="command")
@@ -146,15 +159,19 @@ def run(helper):
                 icon.stop()
                 return
             previous = observe_once(helper, icon, icons, failure, previous)
+            peer.poll("tray")
+            healthy = beat(helper, identity, healthy)
             stopped.wait(1)
 
     thread = threading.Thread(target=monitor, name="joro-tray-observer", daemon=True)
     try:
-        record("start", source="tray", pid=os.getpid())
+        helper.ended_without_stop("tray", "tray.json")
+        record("start", source="tray", pid=os.getpid(), version=helper.version(),
+               python=sys.version.split()[0])
         def setup(ready_icon):
             try:
                 ready_icon.visible = True
-                helper.write(helper.ROOT / "tray.json", {"pid": os.getpid(), "birth": helper.birth(os.getpid())})
+                beat(helper, identity, True)
                 thread.start()
                 ready = helper.named_event("-tray-ready")
                 try:
@@ -162,7 +179,7 @@ def run(helper):
                 finally:
                     helper.K.CloseHandle(ready)
             except Exception as exc:
-                record("tray_setup_failed", source="tray", error=str(exc))
+                record("tray_setup_failed", source="tray", **error_fields(exc))
                 stopped.set()
                 icon.stop()
         icon.run(setup=setup)
@@ -171,6 +188,7 @@ def run(helper):
         if thread.ident is not None:
             thread.join(timeout=3)
         (helper.ROOT / "tray.json").unlink(missing_ok=True)
+        peer.close()
         helper.K.ReleaseMutex(mutex)
         helper.K.CloseHandle(mutex)
         helper.K.CloseHandle(exit_event)

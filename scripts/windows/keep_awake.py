@@ -16,12 +16,14 @@ import uuid
 import winreg
 
 from joro_watcher.power import PowerRequest
-from joro_watcher.event_log import record
+from joro_watcher.event_log import describe_exit, enable_fault_log, failure, install_hooks, record, timestamp
 from joro_watcher import event_log
 
 ROOT = Path(os.environ["LOCALAPPDATA"]) / "Joro" / "keep-awake-state"
 CLAIMS = ROOT / "claims"
 KEY = hashlib.sha256(str(ROOT).casefold().encode()).hexdigest()[:20]
+CLOCK, WALL = time.monotonic, time.time  # a sleep must show even if one clock pauses through it
+STALL_LIMIT = 10  # the staleness limit the tray already applies to the helper's heartbeat
 K = ctypes.WinDLL("kernel32", use_last_error=True)
 for _name, _args, _result in (
     ("OpenProcess", [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
@@ -34,6 +36,7 @@ for _name, _args, _result in (
     ("ResetEvent", [wintypes.HANDLE], wintypes.BOOL),
     ("WaitForSingleObject", [wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD),
     ("CreateToolhelp32Snapshot", [wintypes.DWORD, wintypes.DWORD], wintypes.HANDLE),
+    ("GetExitCodeProcess", [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)], wintypes.BOOL),
 ):
     _fn = getattr(K, _name)
     _fn.argtypes, _fn.restype = _args, _result
@@ -53,12 +56,94 @@ def birth(pid):
             return None
         if waited != 0x102:
             raise ctypes.WinError(ctypes.get_last_error())
-        times = [wintypes.FILETIME() for _ in range(4)]
-        if not K.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return times[0].dwLowDateTime | times[0].dwHighDateTime << 32
+        return created(handle)
     finally:
         K.CloseHandle(handle)
+
+
+def created(handle):
+    times = [wintypes.FILETIME() for _ in range(4)]
+    if not K.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return times[0].dwLowDateTime | times[0].dwHighDateTime << 32
+
+
+def watch(pid, started):
+    """Keep a handle to the process so its exit code can still be read after it ends."""
+    handle = K.OpenProcess(0x1000 | 0x100000, False, pid)
+    if not handle:
+        if ctypes.get_last_error() == 87:
+            return None
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if created(handle) == started:
+            return handle
+    except BaseException:
+        K.CloseHandle(handle)
+        raise
+    K.CloseHandle(handle)
+    return None
+
+
+class Peer:
+    """The other Joro process: its identity comes from a state file, its end from its handle."""
+
+    def __init__(self, name, filename):
+        self.name, self.filename, self.handle, self.pid, self.seen = name, filename, None, None, None
+
+    def poll(self, source):
+        try:
+            if self.handle is None:
+                self.attach()
+            elif K.WaitForSingleObject(self.handle, 0) == 0:
+                self.report(source)
+        except Exception as exc:
+            record("peer_watch_failed", source=source, peer=self.name, **failure(exc, message=False))
+
+    def attach(self):
+        try:
+            value = json.loads((ROOT / self.filename).read_text(encoding="utf-8"))
+            identity = (value["pid"], value["birth"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        if identity == self.seen:
+            return
+        self.seen = identity  # one attempt per process identity, so a failure is not retried every tick
+        self.handle, self.pid = watch(*identity), identity[0]
+
+    def report(self, source):
+        code, handle, self.handle = wintypes.DWORD(), self.handle, None
+        try:
+            if not K.GetExitCodeProcess(handle, ctypes.byref(code)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            K.CloseHandle(handle)
+        record("peer_exited", source=source, peer=self.name, pid=self.pid, **describe_exit(code.value))
+
+    def close(self):
+        if self.handle is not None:
+            K.CloseHandle(self.handle)
+            self.handle = None
+
+
+def ended_without_stop(source, filename):
+    """A clean stop deletes the state file, so a leftover one whose process is dead is exact evidence."""
+    try:
+        value = json.loads((ROOT / filename).read_text(encoding="utf-8"))
+        if birth(value["pid"]) != value["birth"]:
+            record("previous_run_ended_without_stop", source=source, previous_pid=value["pid"],
+                   last_heartbeat=timestamp(value.get("updated_at")))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        record("unclean_check_failed", source=source, **failure(exc, message=False))
+
+
+def version():
+    try:
+        return (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
 
 
 def write(path, value):
@@ -196,12 +281,15 @@ def run():
     if K.WaitForSingleObject(mutex, 0) not in (0, 0x80):
         K.CloseHandle(mutex)
         return
-    stop, ready, request = None, None, None
+    stop, ready, request, reason = None, None, None, "error"
+    peer = Peer("tray", "tray.json")
     try:
         stop, ready = named_event("-stop"), named_event("-ready")
         K.ResetEvent(stop)
         (ROOT / "helper-error.json").unlink(missing_ok=True)
-        record("start", source="helper", pid=os.getpid())
+        ended_without_stop("helper", "helper.json")
+        record("start", source="helper", pid=os.getpid(), version=version(),
+               python=sys.version.split()[0])
         info = {"pid": os.getpid(), "birth": birth(os.getpid()), "power_requested": False,
                 "battery_protection": "unverified; Modern Standby battery limits still apply"}
         write(ROOT / "helper.json", {**info, "updated_at": time.time()})
@@ -209,10 +297,15 @@ def run():
             start_tray()
         except Exception as exc:
             # The visual observer is not a prerequisite for keeping the machine awake.
-            record("tray_start_failed", source="helper", error=str(exc))
+            record("tray_start_failed", source="helper", **failure(exc))
         K.SetEvent(ready)
-        previous = None
+        previous, last_tick, last_wall = None, CLOCK(), WALL()
         while True:
+            now, wall = CLOCK(), WALL()
+            if max(now - last_tick, wall - last_wall) > STALL_LIMIT:
+                record("stall", source="helper", gap_seconds=round(now - last_tick, 1),
+                       wall_gap_seconds=round(wall - last_wall, 1))
+            last_tick, last_wall = now, wall
             current = state()
             wanted = current["active_count"] > 0 or current["uncertain_claims"] > 0
             if wanted and request is None:
@@ -229,7 +322,9 @@ def run():
             write(ROOT / "helper.json", {**info, **current, "power_requested": request is not None,
                                          "updated_at": time.time(),
                                          "diagnostic_error": event_log.LAST_ERROR})
+            peer.poll("helper")
             if K.WaitForSingleObject(stop, 1000) == 0:
+                reason = "requested"
                 break
     finally:
         try:
@@ -237,12 +332,13 @@ def run():
                 request.close()
         finally:
             (ROOT / "helper.json").unlink(missing_ok=True)
+            peer.close()
             for handle in (stop, ready):
                 if handle:
                     K.CloseHandle(handle)
             K.ReleaseMutex(mutex)
             K.CloseHandle(mutex)
-        record("stop", source="helper")
+            record("stop", source="helper", reason=reason)
 
 
 def start_tray():
@@ -310,6 +406,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("run", "start", "stop", "exit", "tray", "status", "hook", "event", "startup-on", "startup-off"))
     args = parser.parse_args()
+    if args.command in ("run", "tray"):
+        install_hooks("helper" if args.command == "run" else "tray")
+        enable_fault_log("helper" if args.command == "run" else "tray")
     try:
         if args.command == "run":
             run()
@@ -363,9 +462,9 @@ def main():
         return 0
     except Exception as exc:
         if args.command not in ("hook", "event"):
-            record("error", source=args.command, error=str(exc))
+            record("error", source=args.command, **failure(exc))
         else:
-            record("publisher_error", source=args.command, error_type=type(exc).__name__)
+            record("publisher_error", source=args.command, **failure(exc, message=False))
         if args.command == "run":
             write(ROOT / "helper-error.json", {"error": str(exc)})
         print(f"Joro keep-awake: {exc}", file=sys.stderr)
