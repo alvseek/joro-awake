@@ -11,6 +11,19 @@ SYSTEM_REQUIRED = 1
 EXECUTION_REQUIRED = 3
 
 
+def system_execution_state():
+    """Read Windows' aggregate execution requirements without enumerating owners."""
+    query = ctypes.WinDLL("PowrProf").CallNtPowerInformation
+    query.argtypes = (wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG,
+                      ctypes.c_void_p, wintypes.ULONG)
+    query.restype = ctypes.c_long  # NTSTATUS, not GetLastError.
+    value = wintypes.ULONG()
+    status = query(16, None, 0, ctypes.byref(value), ctypes.sizeof(value))
+    if status < 0:
+        raise OSError(f"SystemExecutionState query failed: 0x{status & 0xffffffff:08X}")
+    return value.value
+
+
 class DetailedReason(ctypes.Structure):
     _fields_ = [("module", wintypes.HANDLE), ("reason_id", wintypes.ULONG),
                 ("string_count", wintypes.ULONG),

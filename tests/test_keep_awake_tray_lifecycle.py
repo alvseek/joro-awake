@@ -52,9 +52,10 @@ class TrayLifecycleTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.children = []
         for p in (patch.object(helper, "ROOT", self.root), patch.object(helper, "KEY", uuid.uuid4().hex[:20]),
-                  patch.dict(sys.modules, {"pystray": types.SimpleNamespace(
-                      Icon=FakeIcon, Menu=lambda *a: None, MenuItem=lambda *a: None)}),
-                  patch.object(tray, "images", return_value={n: n for n in ("idle", "awake", "warning")})):
+                   patch.dict(sys.modules, {"pystray": types.SimpleNamespace(
+                       Icon=FakeIcon, Menu=lambda *a: None, MenuItem=lambda *a: None)}),
+                   patch.object(tray, "system_execution_state", return_value=0),
+                   patch.object(tray, "images", return_value={n: n for n in ("idle", "blocked", "awake", "warning")})):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(self.cleanup)

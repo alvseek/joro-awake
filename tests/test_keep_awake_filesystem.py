@@ -44,7 +44,10 @@ class FilesystemTests(unittest.TestCase):
                 value = {"pid": 1, "birth": 123, "updated_at": time.time(),
                          "power_requested": False, "clients": []}
                 helper.write(root / "helper.json", value)
-                self.assertEqual(tray.presentation(tray.observe(helper))[0], "idle")
+                with patch.object(tray, "system_execution_state", return_value=0):
+                    self.assertEqual(tray.presentation(tray.observe_sleep_requests(tray.observe(helper)))[0], "idle")
+                with patch.object(tray, "system_execution_state", return_value=1):
+                    self.assertEqual(tray.presentation(tray.observe_sleep_requests(tray.observe(helper)))[0], "blocked")
                 helper.write(root / "helper.json", {**value, "power_requested": True, "clients": ["opencode"]})
                 self.assertEqual(tray.presentation(tray.observe(helper))[0], "awake")
                 helper.write(root / "helper.json", {**value, "uncertain_claims": 1, "power_requested": True})

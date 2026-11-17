@@ -51,12 +51,19 @@ adapters loaded is not discovered retroactively.
 
 | State | Meaning |
 |---|---|
-| Zzz | Monitoring is idle; Windows may sleep. |
+| Zzz | Joro is idle; Windows' aggregate query reports no sleep-prevention request. This is not a guarantee that the PC will sleep. |
+| Yellow Zzz | Joro is idle, but Windows reports a sleep-prevention request. Its owner is unknown. |
 | Green eye | A native keep-awake request is active for the named clients. |
-| Warning | Monitoring stopped, failed, or cannot confidently read activity. Hover for the reason. |
+| Warning | Monitoring stopped, failed, or cannot read activity or Windows sleep requests. Hover for the reason. |
 
 An open client window alone never causes the eye: the state comes from the
-helper's own report. Repeated starts do not create a second icon. `stop` stops
+helper's own report. While Joro is healthy and idle, the tray also reads Windows'
+aggregate execution state with `CallNtPowerInformation(SystemExecutionState)`,
+without administrator permissions. System/away-mode requirements turn Zzz yellow;
+display-only requirements do not. This query does not name apps or drivers,
+diagnose their cause, or detect every reason for a failed sleep/display timeout.
+A query failure shows a warning and retries on the next tick. It never changes
+power requests or settings. Repeated starts do not create a second icon. `stop` stops
 monitoring and leaves the warning visible; the tray's **Exit** or the `exit`
 command stops both the helper and the tray, but only after helper shutdown is
 confirmed. If shutdown fails, the tray stays visible with a warning. Windows may

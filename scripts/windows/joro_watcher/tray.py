@@ -9,6 +9,7 @@ import threading
 import time
 
 from joro_watcher.event_log import failure as error_fields, record
+from joro_watcher.power import system_execution_state
 
 
 def presentation(value):
@@ -17,14 +18,32 @@ def presentation(value):
     if value.get("diagnostic_error"):
         return "warning", "Joro: warning - " + value["diagnostic_error"]
     if not value.get("running"):
-        return "warning", "Joro: monitoring stopped - sleep allowed"
+        return "warning", "Joro: monitoring stopped - Windows sleep requests unknown"
     if value.get("uncertain_claims"):
         return "warning", "Joro: activity uncertain - keeping awake conservatively"
     if value.get("power_requested"):
         names = {"claude": "Claude Code", "opencode": "OpenCode"}
         clients = ", ".join(names.get(c, c) for c in value.get("clients", []))
         return "awake", "Joro: keeping awake" + (": " + clients if clients else "")
-    return "idle", "Joro: idle - sleep allowed"
+    if value.get("windows_sleep_requested") is True:
+        return "blocked", "Joro: idle; Windows reports a sleep-prevention request (owner unknown)"
+    if value.get("windows_sleep_requested") is not False:
+        return "warning", "Joro: idle; Windows sleep requests unknown"
+    return "idle", "Joro: idle; no Windows sleep-prevention request detected"
+
+
+def observe_sleep_requests(value):
+    """Only query when healthy and AI-idle; query failures must never look idle."""
+    if (value.get("error") or value.get("diagnostic_error") or not value.get("running")
+            or value.get("uncertain_claims") or value.get("power_requested")):
+        return value
+    try:
+        # EXECUTION_STATE flags, not POWER_REQUEST_TYPE enum values.
+        # Display-only requests do not mean automatic system sleep is prevented.
+        flags = system_execution_state()
+        return {**value, "windows_sleep_requested": bool(flags & (0x1 | 0x40))}
+    except Exception:
+        return {**value, "windows_sleep_requested": None}
 
 
 def observe(helper):
@@ -48,11 +67,12 @@ def observe(helper):
 def images():
     from PIL import Image, ImageDraw, ImageFont
     result = {}
-    for name in ("idle", "awake", "warning"):
+    for name in ("idle", "blocked", "awake", "warning"):
         image = Image.new("RGBA", (64, 64))
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle((2, 2, 62, 62), radius=14,
-                               fill={"idle": "#334155", "awake": "#047857", "warning": "#92400e"}[name])
+                               fill={"idle": "#334155", "blocked": "#eab308",
+                                     "awake": "#047857", "warning": "#92400e"}[name])
         if name == "awake":
             draw.ellipse((9, 20, 55, 44), fill="white")
             draw.ellipse((24, 23, 40, 41), fill="#064e3b")
@@ -62,7 +82,7 @@ def images():
             draw.ellipse((30, 42, 34, 46), fill="#92400e")
         else:
             font = ImageFont.load_default(size=23)
-            draw.text((6, 18), "Zzz", fill="white", font=font)
+            draw.text((6, 18), "Zzz", fill="#422006" if name == "blocked" else "white", font=font)
         result[name] = image
     return result
 
@@ -100,7 +120,7 @@ def exit_monitoring(helper, icon, icons, stopped, failure):
 
 def observe_once(helper, icon, icons, failure, previous):
     try:
-        value = failure or observe(helper)
+        value = observe_sleep_requests(failure or observe(helper))
         state, title = presentation(value)
         signature = (state, title)
         if signature != previous:

@@ -9,14 +9,72 @@ import threading
 
 WINDOWS = Path(__file__).resolve().parents[1] / "scripts/windows"
 sys.path.insert(0, str(WINDOWS))
-from joro_watcher import event_log, tray
+from joro_watcher import event_log, power, tray
 import keep_awake as helper
 
 
 class TrayTests(unittest.TestCase):
     def test_idle_is_not_an_open_client_process(self):
         self.assertEqual(tray.presentation({"running": True, "power_requested": False,
-                                           "clients": ["opencode"]})[0], "idle")
+                                           "clients": ["opencode"],
+                                           "windows_sleep_requested": False})[0], "idle")
+
+    def test_windows_sleep_flags_and_display_only(self):
+        for flags, expected in ((0, "idle"), (1, "blocked"), (0x40, "blocked"),
+                                (0x41, "blocked"), (2, "idle"), (3, "blocked"),
+                                (0x80000000, "idle")):
+            with self.subTest(flags=flags), patch.object(tray, "system_execution_state", return_value=flags):
+                value = tray.observe_sleep_requests({"running": True})
+                self.assertEqual(tray.presentation(value)[0], expected)
+
+    def test_query_failure_is_unknown_and_recovers(self):
+        with patch.object(tray, "system_execution_state", side_effect=OSError("denied")):
+            value = tray.observe_sleep_requests({"running": True})
+        self.assertEqual(tray.presentation(value)[0], "warning")
+        self.assertIn("unknown", tray.presentation(value)[1])
+        with patch.object(tray, "system_execution_state", return_value=0):
+            self.assertEqual(tray.presentation(tray.observe_sleep_requests(value))[0], "idle")
+
+    def test_missing_windows_result_is_not_idle(self):
+        self.assertEqual(tray.presentation({"running": True})[0], "warning")
+
+    def test_ai_and_errors_keep_precedence_and_skip_query(self):
+        cases = ({"running": True, "power_requested": True},
+                 {"running": True, "uncertain_claims": 1},
+                 {"running": True, "diagnostic_error": "log failed"},
+                 {"error": "unreadable"}, {"running": False})
+        for value in cases:
+            with self.subTest(value=value), patch.object(tray, "system_execution_state") as query:
+                self.assertEqual(tray.observe_sleep_requests(value), value)
+                query.assert_not_called()
+
+    def test_observer_changes_between_clear_blocked_and_unknown(self):
+        icon = MagicMock()
+        icons = {name: name for name in ("idle", "blocked", "warning")}
+        with patch.object(tray, "observe", return_value={"running": True}), \
+             patch.object(tray, "system_execution_state", side_effect=[0, 1, OSError("denied"), 0]), \
+             patch.object(tray, "record", return_value=None):
+            previous = None
+            for state in ("idle", "blocked", "warning", "idle"):
+                previous = tray.observe_once(None, icon, icons, {}, previous)
+                self.assertEqual(previous[0], state)
+                self.assertEqual(icon.icon, state)
+                self.assertLessEqual(len(icon.title), 127)
+
+    def test_native_query_checks_status_and_reads_output(self):
+        query = MagicMock()
+        def success(level, source, source_size, target, target_size):
+            self.assertEqual((level, source, source_size, target_size), (16, None, 0, 4))
+            target._obj.value = 0x41
+            return 0
+        query.side_effect = success
+        with patch.object(power.ctypes, "WinDLL") as dll:
+            dll.return_value.CallNtPowerInformation = query
+            self.assertEqual(power.system_execution_state(), 0x41)
+            query.side_effect = None
+            query.return_value = -1073741790  # STATUS_ACCESS_DENIED
+            with self.assertRaisesRegex(OSError, "C0000022"):
+                power.system_execution_state()
 
     def test_awake_names_the_reporting_clients(self):
         state, title = tray.presentation({"running": True, "power_requested": True,
@@ -79,12 +137,14 @@ class TrayTests(unittest.TestCase):
             self.assertIsNone(tray.observe_once(None, icon, icons, {}, None))
         self.assertEqual(icon.icon, "warning")
         with patch.object(tray, "observe", return_value={"running": True}), \
+             patch.object(tray, "system_execution_state", return_value=0), \
              patch.object(tray, "record", return_value=None):
             self.assertEqual(tray.observe_once(None, icon, icons, {}, None)[0], "idle")
 
     def test_logging_failure_changes_healthy_icon_to_warning(self):
         icon = MagicMock()
         with patch.object(tray, "observe", return_value={"running": True}), \
+             patch.object(tray, "system_execution_state", return_value=0), \
              patch.object(tray, "record", return_value="Log unavailable"):
             self.assertIsNone(tray.observe_once(None, icon, {"idle": "idle", "warning": "warning"}, {}, None))
         self.assertEqual(icon.icon, "warning")
