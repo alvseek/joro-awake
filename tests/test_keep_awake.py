@@ -95,6 +95,44 @@ class KeepAwakeTests(unittest.TestCase):
         helper.claim(self.event(active=False))
         self.assertEqual(helper.state()["active_count"], 0)
 
+    def test_release_retries_a_windows_reader_lock(self):
+        helper.claim(self.event())
+        original = Path.unlink
+        attempts = []
+
+        def locked_once(path, **kwargs):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise PermissionError("reader holds claim")
+            return original(path, **kwargs)
+
+        with patch.object(Path, "unlink", locked_once), patch.object(helper.time, "sleep") as sleep:
+            helper.claim(self.event(active=False))
+        self.assertEqual(len(attempts), 2)
+        sleep.assert_called_once_with(0.05)
+        self.assertEqual(helper.state()["active_count"], 0)
+
+    def test_release_reports_persistent_lock_and_preserves_claim(self):
+        helper.claim(self.event())
+        with patch.object(Path, "unlink", side_effect=PermissionError("locked")) as unlink, \
+             patch.object(helper.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                helper.claim(self.event(active=False))
+        self.assertEqual(unlink.call_count, 40)
+        self.assertEqual(sleep.call_count, 39)
+        self.assertEqual(helper.state()["active_count"], 1)
+
+    def test_release_survives_a_real_open_windows_reader(self):
+        helper.claim(self.event())
+        (path,) = (self.root / "claims").glob("*.json")
+        with path.open("rb") as reader:
+            with self.assertRaises(PermissionError):
+                path.unlink()
+            with patch.object(helper.time, "sleep", side_effect=lambda _: reader.close()) as sleep:
+                helper.claim(self.event(active=False))
+            sleep.assert_called_once_with(0.05)
+        self.assertFalse(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

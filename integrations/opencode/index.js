@@ -57,25 +57,30 @@ export default {
     const observer = (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          const d = event.data ?? {};
-          if (event.type === "shell.created") await set("shell:" + d.info.id, true);
-          else if (["shell.exited", "shell.deleted"].includes(event.type)) await set("shell:" + d.id, false);
-          else if (["permission.asked", "form.created", "question.asked"].includes(event.type)) {
-            const id = d.sessionID ?? d.form?.sessionID;
-            if (sessions.has(id)) {
-              const waiting = pending.get(id) ?? new Set();
-              waiting.add(d.id ?? d.form?.id);
-              pending.set(id, waiting);
-              await set("session:" + id, false);
+          try {
+            const d = event.data ?? {};
+            if (event.type === "shell.created") await set("shell:" + d.info.id, true);
+            else if (["shell.exited", "shell.deleted"].includes(event.type)) await set("shell:" + d.id, false);
+            else if (["permission.asked", "form.created", "question.asked"].includes(event.type)) {
+              const id = d.sessionID ?? d.form?.sessionID;
+              if (sessions.has(id)) {
+                const waiting = pending.get(id) ?? new Set();
+                waiting.add(d.id ?? d.form?.id);
+                pending.set(id, waiting);
+                await set("session:" + id, false);
+              }
+            } else if (["permission.replied", "form.replied", "form.cancelled", "question.replied", "question.rejected"].includes(event.type)) {
+              const id = d.sessionID ?? d.form?.sessionID;
+              const waiting = pending.get(id);
+              waiting?.delete(d.requestID ?? d.id ?? d.form?.id);
+              if (waiting?.size === 0) {
+                pending.delete(id);
+                if (sessions.has(id)) await set("session:" + id, true);
+              }
             }
-          } else if (["permission.replied", "form.replied", "form.cancelled", "question.replied", "question.rejected"].includes(event.type)) {
-            const id = d.sessionID ?? d.form?.sessionID;
-            const waiting = pending.get(id);
-            waiting?.delete(d.requestID ?? d.id ?? d.form?.id);
-            if (waiting?.size === 0) {
-              pending.delete(id);
-              if (sessions.has(id)) await set("session:" + id, true);
-            }
+          } catch (error) {
+            // A failed publication must not end observation of every later job.
+            console.warn("Joro activity update failed:", error.message);
           }
         }
       } catch (error) {

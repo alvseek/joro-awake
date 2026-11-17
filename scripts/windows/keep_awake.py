@@ -163,6 +163,19 @@ def write(path, value):
             time.sleep(0.05)
 
 
+def remove_claim(path):
+    # The helper reads claims every second; Windows can refuse deletion while a
+    # reader holds the file. Use the same bounded retry as atomic publication.
+    for attempt in range(40):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.05)
+
+
 def claim(data):
     if data.get("client") not in ("claude", "opencode") or type(data.get("active")) is not bool:
         raise ValueError("Invalid activity event")
@@ -187,7 +200,7 @@ def claim(data):
                 return
             if not data.get("prompt") or previous.get("prompt") != data["prompt"]:
                 return
-        path.unlink(missing_ok=True)
+        remove_claim(path)
 
 
 class ProcessEntry(ctypes.Structure):
@@ -243,7 +256,7 @@ def state():
             if value.get("client") not in ("claude", "opencode") or type(value.get("birth")) is not int:
                 raise ValueError("Invalid claim")
             if birth(value["pid"]) != value["birth"]:
-                path.unlink(missing_ok=True)
+                remove_claim(path)
             else:
                 active.append(value)
         except FileNotFoundError:
