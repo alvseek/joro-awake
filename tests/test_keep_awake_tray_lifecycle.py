@@ -29,6 +29,16 @@ class FakeIcon:
     def stop(self):
         self.ended.set()
 
+    def update_menu(self):
+        pass
+
+
+def fake_menu(*items):
+    return items
+
+
+fake_menu.SEPARATOR = object()
+
 
 def child():
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL,
@@ -53,8 +63,9 @@ class TrayLifecycleTests(unittest.TestCase):
         self.children = []
         for p in (patch.object(helper, "ROOT", self.root), patch.object(helper, "KEY", uuid.uuid4().hex[:20]),
                    patch.dict(sys.modules, {"pystray": types.SimpleNamespace(
-                       Icon=FakeIcon, Menu=lambda *a: None, MenuItem=lambda *a: None)}),
+                        Icon=FakeIcon, Menu=fake_menu, MenuItem=lambda *a, **kw: None)}),
                    patch.object(tray, "system_execution_state", return_value=0),
+                   patch.object(helper, "startup_enabled", return_value=False),
                    patch.object(tray, "images", return_value={n: n for n in ("idle", "blocked", "awake", "warning")})):
             p.start()
             self.addCleanup(p.stop)
@@ -154,6 +165,95 @@ class TrayLifecycleTests(unittest.TestCase):
         close.assert_called_once()
         kernel.ReleaseMutex.assert_called_once()
         self.assertEqual(kernel.CloseHandle.call_count, 2)
+
+    def test_menu_identifies_version_with_disabled_header_and_separator(self):
+        pystray = sys.modules["pystray"]
+        with patch.object(FakeIcon, "run"), patch.object(pystray, "MenuItem") as item, \
+             patch.object(pystray, "Menu", wraps=fake_menu) as menu, \
+             patch.object(helper, "version", return_value="9.8.7"), patch.object(tray, "record"):
+            menu.SEPARATOR = fake_menu.SEPARATOR
+            tray.run(helper)
+        self.assertEqual(item.call_args_list[0].args, ("Joro Awake · v9.8.7", None))
+        self.assertEqual(item.call_args_list[0].kwargs, {"enabled": False})
+        self.assertIs(menu.call_args.args[1], fake_menu.SEPARATOR)
+        self.assertEqual(item.call_args_list[1].args[0], "Run at startup")
+        self.assertEqual(item.call_args_list[2].args[0], "Exit")
+
+
+class StartupMenuTests(unittest.TestCase):
+    def setUp(self):
+        self.helper, self.icon, self.failure = MagicMock(), MagicMock(), {}
+        self.enabled = False
+        self.helper.startup_enabled.side_effect = lambda: self.enabled
+        def set_enabled(enabled):
+            self.enabled = enabled
+        self.helper.startup.side_effect = set_enabled
+        pystray = types.SimpleNamespace(MenuItem=lambda text, action, **kw:
+                                       types.SimpleNamespace(text=text, action=action, **kw))
+        self.item = tray.startup_menu_item(pystray, self.helper, self.failure)
+
+    def test_checkbox_reads_external_changes_and_click_toggles_both_directions(self):
+        self.assertEqual(self.item.text, "Run at startup")
+        self.assertFalse(self.item.checked(self.item))
+        with patch.object(tray, "record"):
+            self.item.action(self.icon, self.item)
+            self.assertTrue(self.item.checked(self.item))
+            self.item.action(self.icon, self.item)
+        self.assertFalse(self.item.checked(self.item))
+        self.assertEqual([c.args for c in self.helper.startup.call_args_list], [(True,), (False,)])
+        self.enabled = True  # A CLI/external edit, not a click.
+        self.assertTrue(self.item.checked(self.item))
+        self.assertEqual(self.icon.update_menu.call_count, 2)
+
+    def test_write_failure_preserves_check_and_warns_until_successful_retry(self):
+        self.helper.startup.side_effect = PermissionError("denied")
+        with patch.object(tray, "record") as record:
+            self.item.action(self.icon, self.item)
+        self.assertFalse(self.item.checked(self.item))
+        self.assertIn("startup", self.failure["error"])
+        self.assertEqual(events(record, "startup_failed")[0]["error_type"], "PermissionError")
+        self.helper.startup.side_effect = lambda enabled: setattr(self, "enabled", enabled)
+        with patch.object(tray, "record"):
+            self.item.action(self.icon, self.item)
+        self.assertTrue(self.item.checked(self.item))
+        self.assertEqual(self.failure, {})
+
+    def test_read_failure_is_unknown_and_does_not_write(self):
+        self.helper.startup_enabled.side_effect = PermissionError("denied")
+        with patch.object(tray, "record"):
+            self.assertIsNone(self.item.checked(self.item))
+            self.item.action(self.icon, self.item)
+        self.helper.startup.assert_not_called()
+        self.assertIn("error", self.failure)
+
+    def test_unconfirmed_write_does_not_report_success(self):
+        self.helper.startup.side_effect = None
+        with patch.object(tray, "record") as record:
+            self.item.action(self.icon, self.item)
+        self.assertIn("error", self.failure)
+        self.assertEqual(events(record, "startup_changed"), [])
+
+    def test_external_registry_changes_refresh_windows_cached_menu_only_when_changed(self):
+        previous = tray.refresh_startup_menu(self.helper, self.icon, object())
+        self.assertFalse(previous)
+        previous = tray.refresh_startup_menu(self.helper, self.icon, previous)
+        self.assertEqual(self.icon.update_menu.call_count, 1)
+        self.enabled = True
+        previous = tray.refresh_startup_menu(self.helper, self.icon, previous)
+        self.assertTrue(previous)
+        self.assertEqual(self.icon.update_menu.call_count, 2)
+        self.helper.startup_enabled.side_effect = PermissionError("denied")
+        self.assertIsNone(tray.refresh_startup_menu(self.helper, self.icon, previous))
+        self.assertEqual(self.icon.update_menu.call_count, 3)
+
+    def test_failed_menu_refresh_retries_without_ending_observer(self):
+        self.icon.update_menu.side_effect = OSError("menu unavailable")
+        previous = object()
+        with patch.object(tray, "record") as record:
+            self.assertIs(tray.refresh_startup_menu(self.helper, self.icon, previous), previous)
+        self.assertEqual(events(record, "startup_menu_failed")[0]["error_type"], "OSError")
+        self.icon.update_menu.side_effect = None
+        self.assertFalse(tray.refresh_startup_menu(self.helper, self.icon, previous))
 
 
 if __name__ == "__main__":

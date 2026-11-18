@@ -275,6 +275,23 @@ class LifecycleTests(unittest.TestCase):
                 helper.launch_detached("pythonw.exe", ["helper.py", "tray"])
         spawn.assert_not_called()
 
+    def test_startup_read_uses_the_real_entry_not_a_cached_preference(self):
+        registry = MagicMock()
+        registry.REG_SZ = helper.winreg.REG_SZ
+        registry.QueryValueEx.return_value = (f'"pythonw.exe" "{helper.__file__}" run', registry.REG_SZ)
+        with patch.object(helper, "winreg", registry):
+            self.assertTrue(helper.startup_enabled())
+            registry.QueryValueEx.return_value = ('"other-helper.py" run', registry.REG_SZ)
+            self.assertFalse(helper.startup_enabled())
+            registry.QueryValueEx.side_effect = FileNotFoundError()
+            self.assertFalse(helper.startup_enabled())
+        registry.CreateKey.assert_not_called()
+
+    def test_startup_read_propagates_access_errors_instead_of_reporting_disabled(self):
+        with patch.object(helper.winreg, "OpenKey", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                helper.startup_enabled()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,7 +26,7 @@ def presentation(value):
         clients = ", ".join(names.get(c, c) for c in value.get("clients", []))
         return "awake", "Joro: keeping awake" + (": " + clients if clients else "")
     if value.get("windows_sleep_requested") is True:
-        return "blocked", "Joro: idle; Windows reports a sleep-prevention request (owner unknown)"
+        return "blocked", "Joro: idle; Windows reports a sleep-prevention request from other apps"
     if value.get("windows_sleep_requested") is not False:
         return "warning", "Joro: idle; Windows sleep requests unknown"
     return "idle", "Joro: idle; no Windows sleep-prevention request detected"
@@ -151,6 +151,50 @@ def beat(helper, identity, healthy):
         return False
 
 
+def startup_menu_item(pystray, helper, failure):
+    """Read Windows when rebuilding the menu or clicking, not a saved preference."""
+    message = "could not read or change startup; retry Run at startup"
+
+    def checked(item):
+        try:
+            return helper.startup_enabled()
+        except Exception as exc:
+            failure["error"] = message
+            record("startup_failed", source="tray", **error_fields(exc))
+            return None  # Unknown, not a successful read of disabled.
+
+    def toggle(icon, item):
+        try:
+            enabled = not helper.startup_enabled()
+            helper.startup(enabled)
+            if helper.startup_enabled() != enabled:
+                raise RuntimeError("Startup change was not confirmed")
+            if failure.get("error") == message:
+                failure.pop("error")
+            record("startup_changed", source="tray", enabled=enabled)
+        except Exception as exc:
+            failure["error"] = message
+            record("startup_failed", source="tray", **error_fields(exc))
+        icon.update_menu()
+
+    return pystray.MenuItem("Run at startup", toggle, checked=checked)
+
+
+def refresh_startup_menu(helper, icon, previous):
+    """Windows caches native menus; rebuild when the registry changes externally."""
+    try:
+        current = helper.startup_enabled()
+    except Exception:
+        current = None  # The checked callback records the failure and warns.
+    if current != previous:
+        try:
+            icon.update_menu()
+        except Exception as exc:
+            record("startup_menu_failed", source="tray", **error_fields(exc))
+            return previous  # Retry without ending the heartbeat/activity observer.
+    return current
+
+
 def run(helper):
     import pystray
     mutex = helper.K.CreateMutexW(None, False, "Local\\JoroTray-" + helper.KEY)
@@ -163,21 +207,27 @@ def run(helper):
     exit_event = helper.named_event("-tray-exit")
     helper.K.ResetEvent(exit_event)
     icons = images()
-    icon = pystray.Icon("Joro", icons["warning"], "Joro: starting",
-                        menu=pystray.Menu(pystray.MenuItem("Exit", lambda: exit_monitoring(
-                            helper, icon, icons, stopped, failure))))
     failure = {}
+    icon = pystray.Icon("Joro", icons["warning"], "Joro: starting",
+                        menu=pystray.Menu(pystray.MenuItem(
+                                             "Joro Awake · v" + helper.version(), None, enabled=False),
+                                         pystray.Menu.SEPARATOR,
+                                         startup_menu_item(pystray, helper, failure),
+                                         pystray.MenuItem("Exit", lambda: exit_monitoring(
+                            helper, icon, icons, stopped, failure))))
     peer = helper.Peer("helper", "helper.json")
     identity = {"pid": os.getpid(), "birth": helper.birth(os.getpid())}
 
     def monitor():
         previous, healthy = None, True
+        previous_startup = object()
         while not stopped.is_set():
             if helper.K.WaitForSingleObject(exit_event, 0) == 0:
                 record("exit", source="tray", reason="command")
                 stopped.set()
                 icon.stop()
                 return
+            previous_startup = refresh_startup_menu(helper, icon, previous_startup)
             previous = observe_once(helper, icon, icons, failure, previous)
             peer.poll("tray")
             healthy = beat(helper, identity, healthy)

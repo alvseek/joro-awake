@@ -427,6 +427,17 @@ def start():
         K.CloseHandle(ready)
 
 
+def startup_enabled():
+    """Read the actual per-user sign-in entry, without creating a registry key."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            current, kind = winreg.QueryValueEx(key, "JoroKeepAwake")
+            return (kind == winreg.REG_SZ
+                    and str(Path(__file__).resolve()).casefold() in current.casefold())
+    except FileNotFoundError:
+        return False
+
+
 def startup(enabled):
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
         if enabled:

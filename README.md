@@ -5,7 +5,7 @@ progress, shows the actual state in the system tray, and keeps a bounded local
 diagnostic log. It asks Windows for a native system/execution request; it does
 not edit power plans, hold the display on, or run a network service.
 
-**Status: v0.1.0 preview.** This is a small, source-only Python release. It is
+**Status: source preview.** This is a small, source-only Python release. It is
 usable today, but see [Limits](#limits) before relying on it. A no-Python
 Windows executable is required before marketing this to non-developers and is
 not part of this release.
@@ -70,6 +70,16 @@ confirmed. If shutdown fails, the tray stays visible with a warning. Windows may
 put the icon in the tray overflow area at first.
 
 ## Controls
+
+Right-click the tray icon to see **Joro Awake · v&lt;version&gt;** in a disabled
+header above a separator. The version comes from the installed `VERSION` file;
+the hover tooltip stays focused on live monitoring status.
+Click **Run at startup** below the separator to enable or disable
+launching Joro at future Windows sign-ins. Its checkmark reads the current
+Windows startup entry, including changes made through the commands below.
+Changing it does not stop monitoring or start another helper. A failed read or
+change leaves a warning in the tooltip and a diagnostic in the log; retry the
+menu item after resolving the error.
 
 ```powershell
 # Installed helper
