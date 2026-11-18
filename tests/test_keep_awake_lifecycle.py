@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from contextlib import nullcontext
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -217,6 +218,20 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("main", entry["traceback"])
         hooks.assert_called_once_with("helper")
         faults.assert_called_once_with("helper")
+
+    def test_tray_system_exit_is_recorded_before_it_leaves_the_process(self):
+        from joro_watcher import tray
+        with patch.object(tray, "run", side_effect=SystemExit(1)), \
+             patch.object(helper, "install_hooks"), patch.object(helper, "enable_fault_log"), \
+             patch.object(helper.event_log, "tray_diagnostics", return_value=nullcontext()), \
+             patch.object(helper, "record") as record, \
+             patch.object(sys, "argv", ["keep_awake.py", "tray"]):
+            with self.assertRaises(SystemExit) as result:
+                helper.main()
+        self.assertEqual(result.exception.code, 1)
+        (entry,) = events(record, "tray_failed")
+        self.assertEqual(entry["error_type"], "SystemExit")
+        self.assertEqual(entry["error"], "1")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from ctypes import wintypes
 import datetime
 import faulthandler
 import hashlib
+import io
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -19,6 +20,7 @@ LAST_ERROR = None
 FAULT_LIMIT = 256 * 1024
 ENTRY_LIMIT = 8192
 FAULT_FILES = []
+STREAM_GUARD = threading.local()
 EXIT_MEANINGS = {
     0x0: "clean exit",
     0x1: "exited with an error, or killed with taskkill /F",
@@ -139,7 +141,7 @@ def record(event, *, directory=None, **fields):
 
 def install_hooks(source, *, directory=None):
     """Record an exception that escapes the top level or a thread before the process ends."""
-    previous, previous_thread = sys.excepthook, threading.excepthook
+    previous, previous_thread, previous_unraisable = sys.excepthook, threading.excepthook, sys.unraisablehook
 
     def top(kind, exc, trace):
         exc.__traceback__ = trace
@@ -152,7 +154,90 @@ def install_hooks(source, *, directory=None):
                thread=getattr(args.thread, "name", None), **failure(args.exc_value))
         previous_thread(args)
 
-    sys.excepthook, threading.excepthook = top, thread
+    def unraisable(args):
+        exc = args.exc_value
+        if exc is not None:
+            exc.__traceback__ = args.exc_traceback
+            record("unraisable_exception", directory=directory, source=source, **failure(exc))
+        previous_unraisable(args)
+
+    sys.excepthook, threading.excepthook, sys.unraisablehook = top, thread, unraisable
+
+
+class DiagnosticStream(io.TextIOBase):
+    """Bound each output fragment and send it through the existing rotating log."""
+
+    def __init__(self, source, stream, directory=None):
+        self.source, self.stream, self.directory = source, stream, directory
+        self.pending = ""
+        self.lock = threading.RLock()
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    def writable(self):
+        return True
+
+    def write(self, text):
+        if getattr(STREAM_GUARD, "active", False):
+            return len(text)  # record() can report its own failure to stderr.
+        with self.lock:
+            STREAM_GUARD.active = True
+            try:
+                # Walk bounded slices: neither a missing newline nor one huge write
+                # may leave an unbounded pending buffer.
+                for offset in range(0, len(text), 2048):
+                    self.pending += text[offset:offset + 2048]
+                    while "\n" in self.pending or len(self.pending) >= 2048:
+                        newline = self.pending.find("\n")
+                        size = newline + 1 if 0 <= newline < 2048 else 2048
+                        fragment, self.pending = self.pending[:size], self.pending[size:]
+                        record("process_output", directory=self.directory, source=self.source,
+                               stream=self.stream, detail=fragment.rstrip("\r\n"))
+            finally:
+                STREAM_GUARD.active = False
+        return len(text)
+
+    def flush(self):
+        with self.lock:
+            if self.pending:
+                text, self.pending = self.pending, ""
+                self.write(text + "\n")
+
+
+class LibraryLogHandler(logging.Handler):
+    def __init__(self, source, directory=None):
+        super().__init__(logging.WARNING)
+        self.source, self.directory = source, directory
+
+    def emit(self, entry):
+        fields = {"source": self.source, "logger": entry.name,
+                  "level": entry.levelname, "detail": entry.getMessage()}
+        if entry.exc_info and entry.exc_info[1] is not None:
+            fields.update(failure(entry.exc_info[1]))
+        record("library_error", directory=self.directory, **fields)
+
+
+@contextmanager
+def tray_diagnostics(*, directory=None):
+    """pystray catches errors internally; pythonw otherwise discards their output."""
+    stdout, stderr = sys.stdout, sys.stderr
+    logger = logging.getLogger("pystray")
+    old_handlers, old_level, old_propagate = logger.handlers[:], logger.level, logger.propagate
+    handler = LibraryLogHandler("tray", directory)
+    output = DiagnosticStream("tray", "stdout", directory)
+    errors = DiagnosticStream("tray", "stderr", directory)
+    try:
+        sys.stdout, sys.stderr = output, errors
+        logger.handlers, logger.level, logger.propagate = [handler], logging.WARNING, False
+        yield
+    finally:
+        output.flush()
+        errors.flush()
+        sys.stdout, sys.stderr = stdout, stderr
+        logger.handlers, logger.level, logger.propagate = old_handlers, old_level, old_propagate
+        handler.close()
 
 
 def enable_fault_log(name, *, directory=None):

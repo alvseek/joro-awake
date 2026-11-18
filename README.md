@@ -102,20 +102,26 @@ Diagnostics go to `~/.joro/keep-awake.log`, rotated across five files of at most
 1 MiB each, including the current one. Entries are lifecycle events, state
 changes and errors. They never contain prompts, tool contents or credentials.
 
-The log is written so that a helper or tray that disappears can be explained
-afterwards:
+Read the log before restarting a helper or tray that disappears. It records
+the paths below, but an exit code alone cannot distinguish a Python error from
+an external kill, and a forced termination may leave no traceback:
 
 | Entry | What it tells you |
 |---|---|
 | `start` | Which process started, with the Joro and Python versions. |
 | `stop` | The helper ended in an orderly way, and whether that was requested or followed an error. |
 | `error`, `uncaught_exception`, `uncaught_thread_exception` | A Python failure, with its exception type and traceback. |
+| `library_error` | A warning/error caught inside pystray, including its traceback when available. |
+| `process_output` | Tray stdout/stderr, including callback diagnostics, in bounded fragments in the same rotating log. |
+| `unraisable_exception`, `tray_failed` | A callback/finalizer failure or an exception escaping the tray, including `SystemExit`. |
+| `tray_loop_ended` | The tray's message loop returned without a requested exit. |
+| `tray_cleanup_failed` | Tray state-file removal still failed after bounded retries; native resource cleanup continues. |
 | `publisher_error` | A hook or activity report failed. It keeps the type and stack frames but never the message. |
 | `peer_exited` | The helper saw the tray end, or the tray saw the helper end, with the exit code in hex and its usual meaning: clean exit, killed, native crash, logoff or shutdown. |
 | `previous_run_ended_without_stop` | A start found the state file of an earlier run whose process is dead, with that run's PID and last heartbeat. |
 | `stall` | Two of the helper's one-second ticks were more than ten seconds apart, as after a sleep or a freeze. |
 
-A crash below Python leaves a stack dump in `~/.joro/crash-helper.log` or
+A crash below Python may leave a stack dump in `~/.joro/crash-helper.log` or
 `~/.joro/crash-tray.log`, each cut back at start once it passes 256 KiB.
 Tracebacks contain local file paths. Nothing restarts a dead helper or tray;
 the log records what happened.

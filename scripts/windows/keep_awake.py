@@ -427,8 +427,14 @@ def main():
             run()
             return 0
         if args.command == "tray":
-            from joro_watcher.tray import run as run_tray
-            run_tray(sys.modules[__name__])
+            with event_log.tray_diagnostics():
+                from joro_watcher.tray import run as run_tray
+                try:
+                    run_tray(sys.modules[__name__])
+                except BaseException as exc:
+                    # SystemExit bypasses both Exception and sys.excepthook.
+                    record("tray_failed", source="tray", **failure(exc))
+                    raise
             return 0
         if args.command in ("hook", "event"):
             value = json.load(sys.stdin)

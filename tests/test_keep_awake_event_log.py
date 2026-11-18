@@ -2,6 +2,7 @@
 
 import faulthandler
 import json
+import logging
 from pathlib import Path
 import subprocess
 import sys
@@ -77,7 +78,7 @@ class EventLogTests(unittest.TestCase):
         self.assertTrue(all(f.stat().st_size <= 1024 * 1024 for f in files))
 
     def test_uncaught_exceptions_are_recorded_before_the_process_ends(self):
-        old_top, old_thread = sys.excepthook, threading.excepthook
+        old_top, old_thread, old_unraisable = sys.excepthook, threading.excepthook, sys.unraisablehook
         top, thread = MagicMock(), MagicMock()
         sys.excepthook, threading.excepthook = top, thread
         try:
@@ -88,13 +89,73 @@ class EventLogTests(unittest.TestCase):
             worker.start()
             worker.join()
         finally:
-            sys.excepthook, threading.excepthook = old_top, old_thread
+            sys.excepthook, threading.excepthook, sys.unraisablehook = old_top, old_thread, old_unraisable
         events = {entry["event"]: entry for entry in self.lines()}
         self.assertEqual(events["uncaught_exception"]["error_type"], "ValueError")
         self.assertEqual(events["uncaught_thread_exception"]["thread"], "worker")
         self.assertEqual(events["uncaught_thread_exception"]["error_type"], "KeyError")
         top.assert_called_once()
         thread.assert_called_once()
+
+    def test_library_caught_error_and_process_output_reach_rotating_log(self):
+        stdout, stderr = sys.stdout, sys.stderr
+        logger = logging.getLogger("pystray._win32")
+        with event_log.tray_diagnostics(directory=self.directory):
+            try:
+                raise OSError("shell failed")
+            except OSError:
+                logger.error("An error occurred in the main loop", exc_info=True)
+            print("callback failed", file=sys.stderr)
+            print("output without newline", end="")
+        self.assertIs(sys.stdout, stdout)
+        self.assertIs(sys.stderr, stderr)
+        entries = self.lines()
+        library = next(e for e in entries if e["event"] == "library_error")
+        self.assertEqual(library["error_type"], "OSError")
+        self.assertIn("shell failed", library["error"])
+        self.assertIn("test_library_caught_error", library["traceback"])
+        self.assertTrue(any(e.get("detail") == "callback failed" and e["stream"] == "stderr" for e in entries))
+        self.assertTrue(any(e.get("detail") == "output without newline" and e["stream"] == "stdout" for e in entries))
+
+    def test_diagnostic_stream_bounds_unterminated_output_and_avoids_recursion(self):
+        stream = event_log.DiagnosticStream("tray", "stderr", self.directory)
+        text = "x" * 20000
+        self.assertEqual(stream.write(text), len(text))
+        self.assertLess(len(stream.pending), 2048)
+        stream.flush()
+        self.assertEqual("".join(e["detail"] for e in self.lines()), text)
+        with patch.object(event_log, "_record", side_effect=OSError("disk")), \
+             patch.object(sys, "stderr", stream):
+            stream.write("failure\n")
+        self.assertEqual(stream.pending, "")
+
+    def test_unraisable_callback_error_is_captured(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1])"
+                "\nfrom joro_watcher import event_log\n"
+                "event_log.install_hooks('tray', directory=sys.argv[2])\n"
+                "class Broken:\n"
+                " def __del__(self): raise RuntimeError('callback failure')\n"
+                "x = Broken()\ndel x\n")
+        result = subprocess.run([sys.executable, "-c", code, str(WINDOWS), str(self.directory)],
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (entry,) = self.lines()
+        self.assertEqual(entry["event"], "unraisable_exception")
+        self.assertEqual(entry["error_type"], "RuntimeError")
+        self.assertIn("__del__", entry["traceback"])
+
+    def test_tray_diagnostics_restore_streams_and_logger_after_failure(self):
+        stdout, stderr = sys.stdout, sys.stderr
+        logger = logging.getLogger("pystray")
+        handlers, level, propagate = logger.handlers[:], logger.level, logger.propagate
+        with self.assertRaises(SystemExit):
+            with event_log.tray_diagnostics(directory=self.directory):
+                print("last fragment", end="", file=sys.stderr)
+                raise SystemExit(1)
+        self.assertIs(sys.stdout, stdout)
+        self.assertIs(sys.stderr, stderr)
+        self.assertEqual((logger.handlers, logger.level, logger.propagate), (handlers, level, propagate))
+        self.assertEqual(self.lines()[0]["detail"], "last fragment")
 
     def test_unusable_heartbeat_time_becomes_none(self):
         self.assertIsNone(event_log.timestamp(None))

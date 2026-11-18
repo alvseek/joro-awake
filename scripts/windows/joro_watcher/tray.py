@@ -203,12 +203,20 @@ def run(helper):
                 stopped.set()
                 icon.stop()
         icon.run(setup=setup)
+        if not stopped.is_set():
+            record("tray_loop_ended", source="tray", reason="unexpected")
     finally:
         stopped.set()
         if thread.ident is not None:
             thread.join(timeout=3)
-        (helper.ROOT / "tray.json").unlink(missing_ok=True)
-        peer.close()
-        helper.K.ReleaseMutex(mutex)
-        helper.K.CloseHandle(mutex)
-        helper.K.CloseHandle(exit_event)
+        try:
+            helper.remove_claim(helper.ROOT / "tray.json")
+        except Exception as exc:
+            # A locked status file is not a reason for an otherwise clean UI exit
+            # to fail, or to skip releasing the remaining native resources.
+            record("tray_cleanup_failed", source="tray", **error_fields(exc))
+        finally:
+            peer.close()
+            helper.K.ReleaseMutex(mutex)
+            helper.K.CloseHandle(mutex)
+            helper.K.CloseHandle(exit_event)

@@ -133,6 +133,28 @@ class TrayLifecycleTests(unittest.TestCase):
         self.assertEqual((entry["error_type"], entry["error"]), ("RuntimeError", "unexpected"))
         self.assertIn("observe_once", entry["traceback"])
 
+    def test_unexpected_icon_loop_end_is_not_reported_as_a_requested_exit(self):
+        record = MagicMock(return_value=None)
+        with patch.object(FakeIcon, "run"), patch.object(tray, "record", record):
+            tray.run(helper)
+        (entry,) = events(record, "tray_loop_ended")
+        self.assertEqual(entry["reason"], "unexpected")
+        self.assertEqual(events(record, "exit"), [])
+
+    def test_locked_state_cleanup_records_failure_and_releases_resources(self):
+        record = MagicMock(return_value=None)
+        with patch.object(FakeIcon, "run"), patch.object(tray, "record", record), \
+             patch.object(helper, "remove_claim", side_effect=PermissionError("locked")), \
+             patch.object(helper, "birth", return_value=123), \
+             patch.object(helper.Peer, "close") as close, \
+             patch.object(helper, "K", wraps=helper.K) as kernel:
+            tray.run(helper)
+        (entry,) = events(record, "tray_cleanup_failed")
+        self.assertEqual(entry["error_type"], "PermissionError")
+        close.assert_called_once()
+        kernel.ReleaseMutex.assert_called_once()
+        self.assertEqual(kernel.CloseHandle.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
