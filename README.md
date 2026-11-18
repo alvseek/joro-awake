@@ -109,6 +109,7 @@ an external kill, and a forced termination may leave no traceback:
 | Entry | What it tells you |
 |---|---|
 | `start` | Which process started, with the Joro and Python versions. |
+| `process_launch` | Whether startup used direct spawning or the desktop shell to avoid inheriting a terminal's Windows job. |
 | `stop` | The helper ended in an orderly way, and whether that was requested or followed an error. |
 | `error`, `uncaught_exception`, `uncaught_thread_exception` | A Python failure, with its exception type and traceback. |
 | `library_error` | A warning/error caught inside pystray, including its traceback when available. |
@@ -143,6 +144,12 @@ files, not a database or network service. Independent work items cannot release
 one another. `status` distinguishes distinct work (`active_count`) from
 duplicate producer records (`claim_count`), and reports `power_requested` for a
 native request that was issued, not for a guarantee that Windows will honor it.
+When started inside a Windows job, Joro asks the existing desktop Explorer shell
+to launch its background processes. Detaching the console alone does not escape
+a terminal's kill-on-close job, so ordinary terminal or agent-host cleanup could
+otherwise terminate them without a Python traceback. This needs an interactive
+Windows desktop; a failed broker launch is reported rather than falling back to
+the same unsafe job. No scheduled task, service or startup setting is created.
 
 ## Limits
 

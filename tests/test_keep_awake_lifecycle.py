@@ -1,6 +1,7 @@
 """Lifecycle records: peer exit codes, unclean ends, stalls; real folders and child processes."""
 
 import io
+import base64
 import json
 from pathlib import Path
 import subprocess
@@ -232,6 +233,47 @@ class LifecycleTests(unittest.TestCase):
         (entry,) = events(record, "tray_failed")
         self.assertEqual(entry["error_type"], "SystemExit")
         self.assertEqual(entry["error"], "1")
+
+    def test_launch_without_a_windows_job_keeps_the_direct_path(self):
+        kernel = MagicMock()
+        def not_in_job(process, job, result):
+            result._obj.value = False
+            return True
+        kernel.IsProcessInJob.side_effect = not_in_job
+        with patch.object(helper, "K", kernel), patch.object(helper, "record"), \
+             patch.object(helper.subprocess, "Popen") as spawn, patch.object(helper.subprocess, "run") as broker:
+            helper.launch_detached("pythonw.exe", ["helper.py", "tray"])
+        self.assertEqual(spawn.call_args.args[0], ["pythonw.exe", "helper.py", "tray"])
+        broker.assert_not_called()
+
+    def test_launch_in_a_windows_job_uses_the_existing_desktop_shell(self):
+        kernel = MagicMock()
+        def in_job(process, job, result):
+            result._obj.value = True
+            return True
+        kernel.IsProcessInJob.side_effect = in_job
+        with patch.object(helper, "K", kernel), patch.object(helper, "record"), \
+             patch.object(helper.subprocess, "Popen") as spawn, patch.object(helper.subprocess, "run") as broker:
+            helper.launch_detached("C:/Alvi's tools/pythonw.exe", ["C:/a'b/helper.py", "tray"])
+        spawn.assert_not_called()
+        command = base64.b64decode(broker.call_args.args[0][-1]).decode("utf-16le")
+        self.assertIn("FindWindowSW(0,0,8,[ref]$hwnd,1)", command)
+        self.assertIn("$desktop.Document.Application.ShellExecute", command)
+        self.assertIn("Alvi''s tools", command)
+        self.assertIn("a''b/helper.py", command)
+        self.assertTrue(broker.call_args.kwargs["check"])
+
+    def test_failed_desktop_launch_never_falls_back_into_the_terminal_job(self):
+        kernel = MagicMock()
+        def in_job(process, job, result):
+            result._obj.value = True
+            return True
+        kernel.IsProcessInJob.side_effect = in_job
+        with patch.object(helper, "K", kernel), patch.object(helper.subprocess, "Popen") as spawn, \
+             patch.object(helper.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "powershell")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                helper.launch_detached("pythonw.exe", ["helper.py", "tray"])
+        spawn.assert_not_called()
 
 
 if __name__ == "__main__":

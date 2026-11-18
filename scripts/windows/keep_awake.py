@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -26,6 +27,8 @@ CLOCK, WALL = time.monotonic, time.time  # a sleep must show even if one clock p
 STALL_LIMIT = 10  # the staleness limit the tray already applies to the helper's heartbeat
 K = ctypes.WinDLL("kernel32", use_last_error=True)
 for _name, _args, _result in (
+    ("GetCurrentProcess", [], wintypes.HANDLE),
+    ("IsProcessInJob", [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)], wintypes.BOOL),
     ("OpenProcess", [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
     ("GetProcessTimes", [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4, wintypes.BOOL),
     ("CloseHandle", [wintypes.HANDLE], wintypes.BOOL),
@@ -354,6 +357,37 @@ def run():
             record("stop", source="helper", reason=reason)
 
 
+def launch_detached(executable, arguments):
+    """A detached console still inherits a terminal's kill-on-close Windows job."""
+    in_job = wintypes.BOOL()
+    if not K.IsProcessInJob(K.GetCurrentProcess(), None, ctypes.byref(in_job)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not in_job.value:
+        child = subprocess.Popen([str(executable), *arguments],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        record("process_launch", method="direct", launcher_pid=child.pid)
+        return
+    # Ask the existing desktop Explorer process to launch, not an in-process
+    # Shell.Application instance. Breakaway flags alone can be refused by the job.
+    def literal(value):
+        return "'" + str(value).replace("'", "''") + "'"
+    command = (
+        "$ErrorActionPreference='Stop';"
+        "$shell=New-Object -ComObject Shell.Application;"
+        "$hwnd=0;"
+        "$desktop=$shell.Windows().FindWindowSW(0,0,8,[ref]$hwnd,1);"
+        "if ($null -eq $desktop) {throw 'No interactive Windows desktop shell available'};"
+        f"$desktop.Document.Application.ShellExecute({literal(executable)},"
+        f"{literal(subprocess.list2cmdline(arguments))},'','open',0)"
+    )
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    subprocess.run([str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                    base64.b64encode(command.encode("utf-16le")).decode("ascii")],
+                   check=True, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+    record("process_launch", method="desktop-shell")
+
+
 def start_tray():
     try:
         tray = json.loads((ROOT / "tray.json").read_text(encoding="utf-8"))
@@ -367,11 +401,9 @@ def start_tray():
     ready = named_event("-tray-ready")
     try:
         K.ResetEvent(ready)
-        child = subprocess.Popen([str(executable), str(Path(__file__).resolve()), "tray"],
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        launch_detached(executable, [str(Path(__file__).resolve()), "tray"])
         if K.WaitForSingleObject(ready, 5000) != 0:
-            raise RuntimeError(f"Tray did not become ready (PID {child.pid}); inspect ~/.joro/keep-awake.log")
+            raise RuntimeError("Tray did not become ready; inspect ~/.joro/keep-awake.log")
     finally:
         K.CloseHandle(ready)
 
@@ -385,9 +417,7 @@ def start():
         K.ResetEvent(ready)
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         executable = str(pythonw) if pythonw.exists() else sys.executable
-        subprocess.Popen([executable, str(Path(__file__).resolve()), "run"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        launch_detached(executable, [str(Path(__file__).resolve()), "run"])
         K.WaitForSingleObject(ready, 5000)
         result = status()
         if not result["running"]:
