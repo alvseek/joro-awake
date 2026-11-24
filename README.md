@@ -14,6 +14,8 @@ not part of this release.
 
 - Windows 10 or 11.
 - Python 3.12 or newer (developed and tested on Python 3.14).
+  The snapshot window uses Tkinter, included in the default python.org
+  Windows installation.
 - Claude Code and/or OpenCode, if you want activity detection for them.
 - Internet access on the first install so the installer can download the tray
   dependencies into a private environment.
@@ -81,6 +83,19 @@ Changing it does not stop monitoring or start another helper. A failed read or
 change leaves a warning in the tooltip and a diagnostic in the log; retry the
 menu item after resolving the error.
 
+Click **Check power requests…** to take a one-time snapshot of which apps and
+drivers hold Windows power requests. Windows asks for administrator approval
+for the diagnostic only; Joro keeps monitoring normally. The timestamped
+**Summary** separates System sleep, Display and Other (including execution-only
+requests), and marks Joro only by its exact request reason. Identical entries
+within a Windows request type appear once, with a count: `×3` means three
+requests, not three running processes. **Full report**
+keeps the original details, including entries the summary cannot group (for
+example, localized headings). The report is neither saved nor logged. If the
+prompt is cancelled or the check fails, Joro says **Check didn’t complete**.
+Close the snapshot before taking another. This is a point-in-time report, not a
+prediction of whether the PC will sleep.
+
 ```powershell
 # Installed helper
 python "$env:LOCALAPPDATA/Joro/keep-awake/scripts/windows/keep_awake.py" start
@@ -144,6 +159,8 @@ the log records what happened.
 | `scripts/windows/keep_awake.py` | Tracks live, process-owned activity files and requests that Windows remain awake while any covered work remains. Dead process identities are cleaned up. |
 | `scripts/windows/joro_watcher/power.py` | Acquires, clears and closes owned Windows system/execution requests. No power-policy changes. |
 | `scripts/windows/joro_watcher/tray.py` | Observes the helper's report separately, so the icon can still show a warning if the helper fails. |
+| `scripts/windows/joro_watcher/power_snapshot.py` | Runs the on-demand `powercfg /requests` diagnostic and groups its output. |
+| `scripts/windows/joro_watcher/snapshot_viewer.py` | Shows one snapshot in a separate unelevated process and closes when the tray exits. |
 | `scripts/windows/joro_watcher/event_log.py` | Serializes writers and rotation for the bounded log. |
 | `integrations/opencode/index.js` | Tracks model/compaction work and managed shells; permission and form waits suspend the foreground contribution. |
 | `setup-scripts/install_keep_awake.py` | Installs owned files, merges Claude hooks, installs the clients' skill and supports ownership-checked uninstall. |

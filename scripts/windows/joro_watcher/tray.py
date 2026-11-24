@@ -1,5 +1,6 @@
 """Independent tray observer: never derives activity from open application windows."""
 
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import time
 
 from joro_watcher.event_log import failure as error_fields, record
 from joro_watcher.power import system_execution_state
+from joro_watcher import power_snapshot, snapshot_viewer
 
 
 def presentation(value):
@@ -195,6 +197,49 @@ def refresh_startup_menu(helper, icon, previous):
     return current
 
 
+def show_power_snapshot(stopped, output, error):
+    summary, full = power_snapshot.snapshot_text(output, error, datetime.now().astimezone())
+    snapshot_viewer.show(stopped, summary, full)
+
+
+def snapshot_menu_item(pystray, stopped, show):
+    busy = threading.Lock()
+
+    def run_check(icon):
+        try:
+            if stopped.is_set():
+                return
+            try:
+                output, error = power_snapshot.check(), None
+            except power_snapshot.CheckCancelled:
+                output, error = None, "The administrator prompt was cancelled."
+            except (OSError, ValueError):
+                output, error = None, "Windows did not return a complete power-request report."
+            if not stopped.is_set():
+                try:
+                    show(stopped, output, error)
+                except (OSError, ValueError):
+                    if not stopped.is_set():
+                        try:
+                            icon.notify("Check didn’t complete.\n" + (error or "Could not open the snapshot window."),
+                                        "Joro · Power requests")
+                        except Exception:
+                            pass  # A notification failure must not affect the tray or the guard.
+        finally:
+            busy.release()
+
+    def start(icon, item):
+        if stopped.is_set() or not busy.acquire(blocking=False):
+            return
+        try:
+            threading.Thread(target=run_check, args=(icon,), name="joro-power-snapshot", daemon=True).start()
+        except RuntimeError:
+            busy.release()
+            raise
+
+    return pystray.MenuItem("Check power requests…", start)
+
+
 def run(helper):
     import pystray
     mutex = helper.K.CreateMutexW(None, False, "Local\\JoroTray-" + helper.KEY)
@@ -211,9 +256,11 @@ def run(helper):
     icon = pystray.Icon("Joro", icons["warning"], "Joro: starting",
                         menu=pystray.Menu(pystray.MenuItem(
                                              "Joro Awake · v" + helper.version(), None, enabled=False),
-                                         pystray.Menu.SEPARATOR,
-                                         startup_menu_item(pystray, helper, failure),
-                                         pystray.MenuItem("Exit", lambda: exit_monitoring(
+                                          pystray.Menu.SEPARATOR,
+                                          startup_menu_item(pystray, helper, failure),
+                                          snapshot_menu_item(pystray, stopped, show_power_snapshot),
+                                          pystray.Menu.SEPARATOR,
+                                          pystray.MenuItem("Exit", lambda: exit_monitoring(
                             helper, icon, icons, stopped, failure))))
     peer = helper.Peer("helper", "helper.json")
     identity = {"pid": os.getpid(), "birth": helper.birth(os.getpid())}

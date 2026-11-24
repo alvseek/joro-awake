@@ -19,6 +19,8 @@ UNCHECKED = object()
 FILES = ("scripts/windows/keep_awake.py", "scripts/windows/joro_watcher/__init__.py",
           "scripts/windows/joro_watcher/power.py", "integrations/opencode/index.js",
           "scripts/windows/joro_watcher/tray.py", "scripts/windows/joro_watcher/event_log.py",
+          "scripts/windows/joro_watcher/power_snapshot.py",
+          "scripts/windows/joro_watcher/snapshot_viewer.py",
           "procedures/keep-awake.md", "setup-scripts/install_keep_awake.py", "VERSION")
 
 

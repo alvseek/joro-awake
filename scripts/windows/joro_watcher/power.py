@@ -9,6 +9,7 @@ import os
 DISPLAY_REQUIRED = 0
 SYSTEM_REQUIRED = 1
 EXECUTION_REQUIRED = 3
+JORO_REASON = "Joro agent work is active"
 
 
 def system_execution_state():
@@ -86,7 +87,7 @@ class NativePowerAPI:
 class PowerRequest:
     """One owner's handle and request counts; use from one supervising thread."""
 
-    def __init__(self, reason: str = "Joro agent work is active", *, api=None):
+    def __init__(self, reason: str = JORO_REASON, *, api=None):
         if not reason or "\0" in reason:
             raise ValueError("A nonempty, NUL-free request reason is required")
         self.api = api if api is not None else NativePowerAPI()

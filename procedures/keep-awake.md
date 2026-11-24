@@ -39,4 +39,6 @@ The tray shows Zzz when Joro is idle and Windows reports no sleep-prevention req
 
 Claude protection spans permission prompts. A Stop hook is not proof of completion, so Claude releases on its idle notification (normally about a minute later, with a matching prompt ID) or session end/process exit. Missing idle identity is handled conservatively: retain protection until session end, or use manual stop. OpenCode tracks new model/compaction work and new managed shells; permission/form waits suspend the foreground contribution, not independently running shells.
 
+To see named power requests, use **Check power requests…** in the tray and approve the separate Windows administrator prompt. Joro keeps monitoring while the check runs. The timestamped window shows a grouped summary and the full Windows report, which is not logged. Cancelling the prompt is an incomplete check, not proof that no requests exist.
+
 `power_requested` reports a native request, not proof that Windows will honor it indefinitely. Modern Standby battery behavior is **not endurance-verified**. Never promise reliable battery/locked-screen protection from status alone. No display hold, power-plan edit, forced lock/sleep, network listener or MCP server is used.

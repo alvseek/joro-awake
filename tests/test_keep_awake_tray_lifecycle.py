@@ -21,6 +21,7 @@ import keep_awake as helper
 class FakeIcon:
     def __init__(self, name, image, title, menu=None):
         self.icon, self.title, self.visible, self.ended = image, title, False, threading.Event()
+        self.menu = menu
 
     def run(self, setup=None):
         setup(self)
@@ -177,7 +178,40 @@ class TrayLifecycleTests(unittest.TestCase):
         self.assertEqual(item.call_args_list[0].kwargs, {"enabled": False})
         self.assertIs(menu.call_args.args[1], fake_menu.SEPARATOR)
         self.assertEqual(item.call_args_list[1].args[0], "Run at startup")
-        self.assertEqual(item.call_args_list[2].args[0], "Exit")
+        self.assertEqual(item.call_args_list[2].args[0], "Check power requests…")
+        self.assertIs(menu.call_args.args[4], fake_menu.SEPARATOR)
+        self.assertEqual(item.call_args_list[3].args[0], "Exit")
+
+    def test_tray_exit_does_not_wait_for_snapshot_worker(self):
+        pystray = sys.modules["pystray"]
+        entered, finish, finished = threading.Event(), threading.Event(), threading.Event()
+
+        def hold_viewer(stopped, output, error):
+            entered.set()
+            finish.wait(15)
+            finished.set()
+
+        def run_icon(icon, setup):
+            setup(icon)
+            item = next(item for item in icon.menu if isinstance(item, tuple)
+                        and item[0] == "Check power requests…")
+            item[1](icon, item)
+            icon.ended.wait(15)
+
+        record = MagicMock(return_value=None)
+        try:
+            with patch.object(FakeIcon, "run", run_icon), \
+                 patch.object(pystray, "MenuItem", side_effect=lambda title, action, **kw: (title, action)), \
+                 patch.object(tray.power_snapshot, "check", return_value=b"fixture"), \
+                 patch.object(tray, "show_power_snapshot", side_effect=hold_viewer):
+                for _ in self.run_tray(record):
+                    self.assertTrue(entered.wait(5))
+                self.assertFalse(finished.is_set())
+                self.assertFalse((self.root / "tray.json").exists())
+        finally:
+            finish.set()
+            if entered.is_set():
+                self.assertTrue(finished.wait(3))
 
 
 class StartupMenuTests(unittest.TestCase):
