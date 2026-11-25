@@ -49,6 +49,12 @@ Start a new Claude Code session after installing its hooks. OpenCode discovers
 the installed global plugin by itself. Work that was already in flight when the
 adapters loaded is not discovered retroactively.
 
+When an OpenCode background shell returns a result to its parent session, Joro
+keeps its Windows request active while the parent handles the result. Once
+the work finishes, Joro releases protection. If that final handoff claim
+cannot be removed on the first attempt, Joro retries without waiting for
+another OpenCode event.
+
 ## Tray states
 
 | State | Meaning |
