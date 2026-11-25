@@ -10,7 +10,7 @@ import tempfile
 from contextlib import nullcontext
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 WINDOWS = Path(__file__).resolve().parents[1] / "scripts/windows"
 sys.path.insert(0, str(WINDOWS))
@@ -125,15 +125,16 @@ class LifecycleTests(unittest.TestCase):
             helper.ended_without_stop("helper", "helper.json")
         record.assert_not_called()
 
-    def run_helper(self, wait_results, clock, state=None, wall=None):
-        kernel, request, ticks = MagicMock(), MagicMock(), iter(clock)
+    def run_helper(self, wait_results, clock, state=None, wall=None, requests=None):
+        kernel, ticks = MagicMock(), iter(clock)
+        factory = MagicMock(side_effect=requests or [MagicMock(), MagicMock()])
         walls = iter(wall or clock)
         kernel.WaitForSingleObject.side_effect = wait_results
         patches = [patch.object(helper, "K", kernel), patch.object(helper, "birth", return_value=123),
                    patch.object(helper, "write"), patch.object(helper, "start_tray"),
                    patch.object(helper, "CLOCK", lambda: next(ticks)),
                    patch.object(helper, "WALL", lambda: next(walls)),
-                   patch.object(helper, "PowerRequest", return_value=request),
+                   patch.object(helper, "PowerRequest", factory),
                    patch.object(helper, "state", state or MagicMock(return_value={
                        "active_count": 1, "clients": ["opencode"], "uncertain_claims": 0}))]
         error = None
@@ -147,7 +148,7 @@ class LifecycleTests(unittest.TestCase):
             finally:
                 for p in reversed(patches):
                     p.stop()
-        return record, request, error
+        return record, factory, error
 
     def test_gap_over_ten_seconds_between_ticks_is_a_stall(self):
         record, _, _ = self.run_helper([0, 0x102, 0x102, 0], [0, 1.0, 31.5, 32.5])
@@ -168,8 +169,55 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn("error", entry)
 
     def test_normal_ticks_are_not_stalls(self):
-        record, _, _ = self.run_helper([0, 0x102, 0], [0, 1.0, 2.0])
+        record, factory, error = self.run_helper([0, 0x102, 0], [0, 1.0, 2.0])
+        self.assertIsNone(error)
         self.assertEqual(events(record, "stall"), [])
+        self.assertEqual(events(record, "power_request_renewed"), [])
+        factory.assert_called_once_with()
+
+    def test_stall_replaces_the_native_request_if_work_is_still_active(self):
+        requests = MagicMock()
+        record, factory, error = self.run_helper(
+            [0, 0x102, 0x102, 0], [0, 1.0, 31.5, 32.5],
+            requests=[requests.original, requests.replacement])
+        self.assertIsNone(error)
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(requests.mock_calls, [
+            call.original.acquire(), call.original.discard(),
+            call.replacement.acquire(), call.replacement.close()])
+        self.assertEqual(len(events(record, "power_request_renewed")), 1)
+
+    def test_stall_releases_instead_of_renewing_if_work_finished(self):
+        request = MagicMock()
+        state = MagicMock(side_effect=[{"active_count": count, "clients": [], "uncertain_claims": 0}
+                                       for count in (1, 0)])
+        record, factory, error = self.run_helper(
+            [0, 0x102, 0], [0, 1.0, 30.0], state, requests=[request])
+        self.assertIsNone(error)
+        factory.assert_called_once_with()
+        self.assertEqual(request.mock_calls, [call.acquire(), call.discard()])
+        self.assertEqual(events(record, "power_request_renewed"), [])
+        self.assertFalse(events(record, "helper_state")[-1]["power_requested"])
+
+    def test_failed_renewal_cleans_up_the_partial_request_without_reporting_success(self):
+        original, replacement = MagicMock(), MagicMock()
+        replacement.acquire.side_effect = OSError("Windows refused the request")
+        record, _, error = self.run_helper(
+            [0, 0x102, 0], [0, 1.0, 30.0], requests=[original, replacement])
+        self.assertIsInstance(error, OSError)
+        original.discard.assert_called_once_with()
+        replacement.close.assert_called_once_with()
+        self.assertEqual(events(record, "power_request_renewed"), [])
+
+    def test_discard_closes_the_object_without_clearing_revocable_counts(self):
+        api = MagicMock()
+        request = helper.PowerRequest(api=api)
+        request.acquire()
+        request.discard()
+        request.close()
+        api.clear.assert_not_called()
+        api.close.assert_called_once_with(api.create.return_value)
+        self.assertIsNone(request.handle)
 
     def test_start_line_carries_versions_and_requested_stop_says_so(self):
         record, _, _ = self.run_helper([0, 0], [0, 1.0])
@@ -181,7 +229,8 @@ class LifecycleTests(unittest.TestCase):
     def test_stop_after_an_error_says_so_and_still_releases_power(self):
         state = MagicMock(side_effect=[{"active_count": 1, "clients": [], "uncertain_claims": 0},
                                        RuntimeError("boom")])
-        record, request, error = self.run_helper([0, 0x102], [0, 1.0, 2.0], state)
+        request = MagicMock()
+        record, _, error = self.run_helper([0, 0x102], [0, 1.0, 2.0], state, requests=[request])
         self.assertIsInstance(error, RuntimeError)
         self.assertEqual(events(record, "stop")[0]["reason"], "error")
         request.close.assert_called_once()

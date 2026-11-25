@@ -127,13 +127,18 @@ class PowerRequest:
         except ExceptionGroup as exc:
             errors.extend(exc.exceptions)
         try:
-            self.api.close(self.handle)
-            self.handle = None
-            self.acquired.clear()
+            self.discard()
         except OSError as exc:
             errors.append(exc)
         if errors:
             raise ExceptionGroup("Native power-request cleanup failed", errors)
+
+    def discard(self) -> None:
+        """Close the object without decrementing counts Windows may have revoked."""
+        if self.handle is not None:
+            self.api.close(self.handle)
+            self.handle = None
+            self.acquired.clear()
 
     def __enter__(self):
         return self

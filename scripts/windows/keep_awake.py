@@ -318,15 +318,24 @@ def run():
         previous, last_tick, last_wall = None, CLOCK(), WALL()
         while True:
             now, wall = CLOCK(), WALL()
-            if max(now - last_tick, wall - last_wall) > STALL_LIMIT:
+            stalled = max(now - last_tick, wall - last_wall) > STALL_LIMIT
+            if stalled:
                 record("stall", source="helper", gap_seconds=round(now - last_tick, 1),
                        wall_gap_seconds=round(wall - last_wall, 1))
             last_tick, last_wall = now, wall
             current = state()
             wanted = current["active_count"] > 0 or current["uncertain_claims"] > 0
+            # Windows can terminate the requests during sleep without closing
+            # their handle. A fresh request is needed if work survives a gap.
+            stale = stalled and request is not None
+            if stale:
+                request.discard()
+                request = None
             if wanted and request is None:
                 request = PowerRequest()
                 request.acquire()
+                if stale:
+                    record("power_request_renewed", source="helper")
             elif not wanted and request is not None:
                 request.close()
                 request = None

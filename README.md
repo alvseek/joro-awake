@@ -146,6 +146,7 @@ an external kill, and a forced termination may leave no traceback:
 | `peer_exited` | The helper saw the tray end, or the tray saw the helper end, with the exit code in hex and its usual meaning: clean exit, killed, native crash, logoff or shutdown. |
 | `previous_run_ended_without_stop` | A start found the state file of an earlier run whose process is dead, with that run's PID and last heartbeat. |
 | `stall` | Two of the helper's one-second ticks were more than ten seconds apart, as after a sleep or a freeze. |
+| `power_request_renewed` | Work was still active after a gap and Windows accepted a fresh request. This does not mean Windows will honor it indefinitely. |
 
 A crash below Python may leave a stack dump in `~/.joro/crash-helper.log` or
 `~/.joro/crash-tray.log`, each cut back at start once it passes 256 KiB.
